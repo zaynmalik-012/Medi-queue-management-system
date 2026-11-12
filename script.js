@@ -1,7 +1,31 @@
-// State & LocalStorage Namespaces
+// =========================================================
+// 1. FIREBASE INITIALIZATION (Your Exact Config)
+// =========================================================
+const firebaseConfig = {
+  apiKey: "AIzaSyBObdWjBpQtZIO4x8GbKopAf9AkU84i9X8",
+  authDomain: "mediqueue-opd.firebaseapp.com",
+  databaseURL: "https://mediqueue-opd-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "mediqueue-opd",
+  storageBucket: "mediqueue-opd.firebasestorage.app",
+  messagingSenderId: "17605326894",
+  appId: "1:17605326894:web:78e594469fc01563c487bf"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+// Local session namespace (keeps login session per browser)
 const STORAGE_PREFIX = "mediqueue_";
 
-// Standard 14 OPD Departments with Dual Names (Medical / Simple)
+// Real-Time Cloud Memory Mirrors (Auto-updated by Firebase)
+let cloudBookings = [];
+let cloudPatients = [];
+let cloudAvailability = [];
+let cloudDirectConsults = [];
+
+// =========================================================
+// 2. MASTER OPD DEPARTMENTS & DOCTORS DIRECTORY
+// =========================================================
 const OPD_DEPARTMENTS = [
   { id: "gen", name: "General Medicine / General Doctor" },
   { id: "ped", name: "Pediatrics / Child Specialist" },
@@ -19,7 +43,6 @@ const OPD_DEPARTMENTS = [
   { id: "endo", name: "Endocrinology / Hormones and Diabetes" }
 ];
 
-// Seed Registered Doctors with Direct Intercom Extensions & Phone
 const defaultDoctors = [
   {
     id: "doc_rao",
@@ -119,7 +142,6 @@ const defaultDoctors = [
   }
 ];
 
-// Available 20-minute OPD slots
 const ALL_20MIN_SLOTS = [
   "09:00 AM - 09:20 AM",
   "09:20 AM - 09:40 AM",
@@ -139,7 +161,6 @@ const ALL_20MIN_SLOTS = [
   "03:40 PM - 04:00 PM"
 ];
 
-// Emergency Medical Officers (EMO)
 const emergencyDoctors = [
   { name: "Dr. Vikram Deshmukh", role: "Chief Trauma Specialist", phone: "+91 98201 11999", room: "Emergency Bay 1" },
   { name: "Dr. Neha Kulkarni", role: "Critical Care & Resuscitation", phone: "+91 98201 22888", room: "ICU Triage" },
@@ -151,44 +172,35 @@ let currentTargetDoctor = null;
 let currentPendingReportBase64 = null;
 let callTimerInterval = null;
 
-// Storage Helpers
+// =========================================================
+// 3. CLOUD DATABASE GETTERS, SETTERS & REAL-TIME LISTENERS
+// =========================================================
 function getDoctors() {
-  const stored = localStorage.getItem(STORAGE_PREFIX + "doctors");
-  if (!stored) {
-    localStorage.setItem(STORAGE_PREFIX + "doctors", JSON.stringify(defaultDoctors));
-    return defaultDoctors;
-  }
-  return JSON.parse(stored);
+  return defaultDoctors;
 }
 
 function getBookings() {
-  return JSON.parse(localStorage.getItem(STORAGE_PREFIX + "all_bookings") || "[]");
+  return cloudBookings;
 }
 
 function saveBookings(bookings) {
-  localStorage.setItem(STORAGE_PREFIX + "all_bookings", JSON.stringify(bookings));
-  window.dispatchEvent(new Event("mediqueue_sync"));
-}
-
-function getActiveUser() {
-  return JSON.parse(localStorage.getItem(STORAGE_PREFIX + "active_user") || "null");
-}
-
-function getActiveDoctor() {
-  return JSON.parse(localStorage.getItem(STORAGE_PREFIX + "active_doc") || "null");
-}
-
-function getMyToken() {
-  return JSON.parse(localStorage.getItem(STORAGE_PREFIX + "my_token") || "null");
+  cloudBookings = bookings;
+  bookings.forEach(booking => {
+    db.collection("bookings").doc(booking.bookingId).set(booking)
+      .catch(err => console.error("Firebase booking write error:", err));
+  });
 }
 
 function getDoctorAvailabilityRecords() {
-  return JSON.parse(localStorage.getItem(STORAGE_PREFIX + "doc_availability") || "[]");
+  return cloudAvailability;
 }
 
 function saveDoctorAvailabilityRecords(records) {
-  localStorage.setItem(STORAGE_PREFIX + "doc_availability", JSON.stringify(records));
-  window.dispatchEvent(new Event("mediqueue_sync"));
+  cloudAvailability = records;
+  records.forEach(record => {
+    db.collection("doctor_availability").doc(record.doctorId).set(record)
+      .catch(err => console.error("Firebase availability write error:", err));
+  });
 }
 
 function getDoctorAvailability(docId) {
@@ -203,14 +215,62 @@ function getDoctorAvailability(docId) {
   };
 }
 
-// DIRECT SPECIALIST CONSULTATION & REPORT STORAGE
 function getDirectConsultations() {
-  return JSON.parse(localStorage.getItem(STORAGE_PREFIX + "direct_consults") || "[]");
+  return cloudDirectConsults;
 }
 
-function saveDirectConsultations(data) {
-  localStorage.setItem(STORAGE_PREFIX + "direct_consults", JSON.stringify(data));
-  window.dispatchEvent(new Event("mediqueue_sync"));
+function saveDirectConsultations(consults) {
+  cloudDirectConsults = consults;
+  consults.forEach(channel => {
+    db.collection("direct_consults").doc(channel.channelKey).set(channel)
+      .catch(err => console.error("Firebase consult write error:", err));
+  });
+}
+
+function getActiveUser() {
+  return JSON.parse(localStorage.getItem(STORAGE_PREFIX + "active_user") || "null");
+}
+
+function getActiveDoctor() {
+  return JSON.parse(localStorage.getItem(STORAGE_PREFIX + "active_doc") || "null");
+}
+
+function getMyToken() {
+  return JSON.parse(localStorage.getItem(STORAGE_PREFIX + "my_token") || "null");
+}
+
+function initRealtimeDatabaseListeners() {
+  // 1. Real-time Bookings & Queue Stream
+  db.collection("bookings").onSnapshot(snapshot => {
+    cloudBookings = snapshot.docs.map(doc => doc.data());
+    refreshAllVisibleViews();
+  }, err => console.error("Bookings listener error:", err));
+
+  // 2. Real-time Doctor Availability / Pause Stream
+  db.collection("doctor_availability").onSnapshot(snapshot => {
+    cloudAvailability = snapshot.docs.map(doc => doc.data());
+    refreshAllVisibleViews();
+  }, err => console.error("Availability listener error:", err));
+
+  // 3. Real-time Direct Specialist Chat & Report Stream
+  db.collection("direct_consults").onSnapshot(snapshot => {
+    cloudDirectConsults = snapshot.docs.map(doc => doc.data());
+    if (currentTargetDoctor) {
+      renderDirectConsultMessages();
+    }
+  }, err => console.error("Consultations listener error:", err));
+
+  // 4. Real-time Patients Account Stream
+  db.collection("patients").onSnapshot(snapshot => {
+    cloudPatients = snapshot.docs.map(doc => doc.data());
+  }, err => console.error("Patients listener error:", err));
+}
+
+function refreshAllVisibleViews() {
+  renderHome();
+  renderLiveQueueBoard();
+  renderPatientTokenView();
+  renderDoctorDesk();
 }
 
 function getTodayString() {
@@ -227,7 +287,9 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
-// ----------------- SMART QUEUE ENGINE -----------------
+// =========================================================
+// 4. SMART QUEUE ENGINE (Preserves Late Patient Priority)
+// =========================================================
 const SmartQueue = {
   getDoctorQueue(docId, date) {
     const bookings = getBookings();
@@ -273,8 +335,8 @@ const SmartQueue = {
     if (target) {
       target.status = "Called";
       target.calledTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      this.recalculateWaitTimes(docId, date, all);
       saveBookings(all);
-      this.recalculateWaitTimes(docId, date);
       return { success: true, booking: target };
     }
     return { success: false, message: "Patient not found." };
@@ -290,8 +352,8 @@ const SmartQueue = {
 
     target.status = "In Consultation";
     target.consultationStartTime = Date.now();
+    this.recalculateWaitTimes(target.doctorId, target.appointmentDate, all);
     saveBookings(all);
-    this.recalculateWaitTimes(target.doctorId, target.appointmentDate);
     return { success: true, booking: target };
   },
 
@@ -305,8 +367,8 @@ const SmartQueue = {
 
     target.status = "Completed";
     target.completedTime = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    this.recalculateWaitTimes(target.doctorId, target.appointmentDate, all);
     saveBookings(all);
-    this.recalculateWaitTimes(target.doctorId, target.appointmentDate);
     return { success: true, booking: target };
   },
 
@@ -319,8 +381,8 @@ const SmartQueue = {
     }
 
     target.status = "No Show – Awaiting Arrival";
+    this.recalculateWaitTimes(target.doctorId, target.appointmentDate, all);
     saveBookings(all);
-    this.recalculateWaitTimes(target.doctorId, target.appointmentDate);
     return { success: true, booking: target };
   },
 
@@ -333,8 +395,8 @@ const SmartQueue = {
     }
 
     target.status = "Arrived Late – Waiting";
+    this.recalculateWaitTimes(target.doctorId, target.appointmentDate, all);
     saveBookings(all);
-    this.recalculateWaitTimes(target.doctorId, target.appointmentDate);
     return { success: true, booking: target };
   },
 
@@ -350,16 +412,19 @@ const SmartQueue = {
     }
 
     target.status = "Cancelled";
+    this.recalculateWaitTimes(target.doctorId, target.appointmentDate, all);
     saveBookings(all);
-    this.recalculateWaitTimes(target.doctorId, target.appointmentDate);
     return { success: true, booking: target };
   },
 
-  recalculateWaitTimes(docId, date) {
-    const all = getBookings();
+  recalculateWaitTimes(docId, date, bookingsList = null) {
+    const all = bookingsList || getBookings();
     const docs = getDoctors();
     const doc = docs.find(d => d.id === docId) || { avgTime: 10 };
-    const eligible = this.getEligibleQueue(docId, date);
+    const eligible = all
+      .filter(b => b.doctorId === docId && b.appointmentDate === date && (b.status === "Waiting" || b.status === "Arrived Late – Waiting"))
+      .sort((a, b) => parseInt(a.tokenNumber, 10) - parseInt(b.tokenNumber, 10));
+
     const inConsult = all.some(b => b.doctorId === docId && b.appointmentDate === date && b.status === "In Consultation");
     const avail = getDoctorAvailability(docId);
 
@@ -375,12 +440,12 @@ const SmartQueue = {
         ref.estimatedWaitMinutes = wait;
       }
     });
-
-    localStorage.setItem(STORAGE_PREFIX + "all_bookings", JSON.stringify(all));
   }
 };
 
-// ----------------- NAVIGATION & TOAST -----------------
+// =========================================================
+// 5. NAVIGATION & TOAST NOTIFICATIONS
+// =========================================================
 function navigateTo(viewName) {
   const views = ["home", "book", "track", "patient", "doctor", "auth"];
   views.forEach(v => {
@@ -408,6 +473,7 @@ function navigateTo(viewName) {
 
 function showToast(message) {
   const toast = document.getElementById("toast");
+  if (!toast) return;
   toast.innerText = message;
   toast.classList.remove("hidden");
   setTimeout(() => toast.classList.add("hidden"), 3200);
@@ -415,6 +481,7 @@ function showToast(message) {
 
 function updateAuthHeader() {
   const authBox = document.getElementById("auth-header-actions");
+  if (!authBox) return;
   const user = getActiveUser();
   if (user) {
     authBox.innerHTML = `
@@ -428,9 +495,12 @@ function updateAuthHeader() {
   }
 }
 
-// ----------------- 1. HOME VIEW -----------------
+// =========================================================
+// 6. HOME VIEW
+// =========================================================
 function renderHome() {
   const container = document.getElementById("home-dept-list");
+  if (!container) return;
   const docs = getDoctors();
   const today = getTodayString();
 
@@ -465,9 +535,12 @@ function handleStartBooking() {
   }
 }
 
-// ----------------- 2. BOOKING VIEW -----------------
+// =========================================================
+// 7. BOOKING VIEW & SLOT LOCKING
+// =========================================================
 function renderBookingForm() {
   const deptSelect = document.getElementById("book-department");
+  if (!deptSelect) return;
 
   deptSelect.innerHTML = OPD_DEPARTMENTS.map(d => 
     `<option value="${d.id}">${d.name}</option>`
@@ -621,8 +694,8 @@ function handleBookingSubmit(e) {
   };
 
   bookings.push(newBooking);
+  SmartQueue.recalculateWaitTimes(doc.id, date, bookings);
   saveBookings(bookings);
-  SmartQueue.recalculateWaitTimes(doc.id, date);
 
   localStorage.setItem(STORAGE_PREFIX + "my_token", JSON.stringify(newBooking));
 
@@ -634,9 +707,12 @@ function handleBookingSubmit(e) {
   navigateTo("patient");
 }
 
-// ----------------- 3. LIVE QUEUE BOARD -----------------
+// =========================================================
+// 8. LIVE QUEUE BOARD
+// =========================================================
 function renderLiveQueueBoard() {
   const container = document.getElementById("queue-board-list");
+  if (!container) return;
   const docs = getDoctors();
   const today = getTodayString();
 
@@ -682,9 +758,12 @@ function renderLiveQueueBoard() {
   }).join("");
 }
 
-// ----------------- 4. PATIENT DASHBOARD / ACTIVE TOKEN -----------------
+// =========================================================
+// 9. PATIENT DASHBOARD / ACTIVE TOKEN
+// =========================================================
 function renderPatientTokenView() {
   const container = document.getElementById("patient-token-container");
+  if (!container) return;
   const storedToken = getMyToken();
 
   if (!storedToken) {
@@ -799,9 +878,12 @@ function getStatusBadgeClass(status) {
   }
 }
 
-// ----------------- 5. DOCTOR AUTHENTICATION & DESK -----------------
+// =========================================================
+// 10. DOCTOR AUTHENTICATION & DESK
+// =========================================================
 function renderDoctorDesk() {
   const container = document.getElementById("doctor-view-container");
+  if (!container) return;
   const activeDoc = getActiveDoctor();
   const docs = getDoctors();
 
@@ -1134,7 +1216,9 @@ function handleDocCancelToken(bookingId) {
   }
 }
 
-// ----------------- DOCTOR UNAVAILABILITY -----------------
+// =========================================================
+// 11. DOCTOR UNAVAILABILITY
+// =========================================================
 function handleToggleUnavailability(docId) {
   const avail = getDoctorAvailability(docId);
   if (!avail.isAvailable) {
@@ -1198,7 +1282,9 @@ function formatTimeDisplay(timeStr) {
   return `${hour}:${m} ${ampm}`;
 }
 
-// ----------------- DIRECT SPECIALIST CONSULTATION & REPORT SHARING -----------------
+// =========================================================
+// 12. DIRECT SPECIALIST CONSULTATION & COMPRESSED REPORT UPLOAD
+// =========================================================
 function getChannelKey(docId1, docId2) {
   return [docId1, docId2].sort().join("___");
 }
@@ -1212,7 +1298,6 @@ function openDirectConsultModal(targetDocId) {
   document.getElementById("direct-consult-title").innerText = `Direct Line: ${currentTargetDoctor.name}`;
   document.getElementById("direct-consult-subtitle").innerText = `${currentTargetDoctor.deptName} • Room ${currentTargetDoctor.room} (${currentTargetDoctor.intercom})`;
   
-  // Auto-populate patient token if doctor is actively consulting one
   const today = getTodayString();
   const currentPatient = SmartQueue.getCurrentPatient(activeDoc.id, today);
   const tokenRefInput = document.getElementById("direct-consult-token-ref");
@@ -1231,6 +1316,7 @@ function closeDirectConsultModal() {
   currentTargetDoctor = null;
 }
 
+// Compresses photo on HTML Canvas so it stays under Firestore's 1MB document limit
 function handleReportFileSelected(event) {
   const file = event.target.files[0];
   if (!file) return;
@@ -1242,10 +1328,32 @@ function handleReportFileSelected(event) {
 
   const reader = new FileReader();
   reader.onload = function(e) {
-    currentPendingReportBase64 = e.target.result;
-    document.getElementById("preview-img-tag").src = currentPendingReportBase64;
-    document.getElementById("preview-img-name").innerText = `${file.name.substring(0, 22)}...`;
-    document.getElementById("image-attachment-preview").classList.remove("hidden");
+    const img = new Image();
+    img.onload = function() {
+      const canvas = document.createElement("canvas");
+      const MAX_DIM = 800;
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height && width > MAX_DIM) {
+        height *= MAX_DIM / width;
+        width = MAX_DIM;
+      } else if (height > MAX_DIM) {
+        width *= MAX_DIM / height;
+        height = MAX_DIM;
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, width, height);
+
+      currentPendingReportBase64 = canvas.toDataURL("image/jpeg", 0.7);
+      document.getElementById("preview-img-tag").src = currentPendingReportBase64;
+      document.getElementById("preview-img-name").innerText = `${file.name.substring(0, 20)}...`;
+      document.getElementById("image-attachment-preview").classList.remove("hidden");
+    };
+    img.src = e.target.result;
   };
   reader.readAsDataURL(file);
 }
@@ -1339,7 +1447,9 @@ function renderDirectConsultMessages() {
   win.scrollTop = win.scrollHeight;
 }
 
-// ----------------- DIRECT INTERCOM CALL SIMULATION -----------------
+// =========================================================
+// 13. DIRECT INTERCOM CALL SIMULATION
+// =========================================================
 function initiateQuickCall(targetDocId) {
   const docs = getDoctors();
   currentTargetDoctor = docs.find(d => d.id === targetDocId);
@@ -1380,7 +1490,9 @@ function endIntercomCall() {
   showToast("Direct consultation call ended.");
 }
 
-// ----------------- IMAGE VIEWER -----------------
+// =========================================================
+// 14. IMAGE VIEWER
+// =========================================================
 function openImageViewer(imageSrc) {
   const img = document.getElementById("enlarged-report-img");
   img.src = imageSrc;
@@ -1391,7 +1503,9 @@ function closeImageViewer() {
   document.getElementById("modal-image-viewer").classList.remove("show");
 }
 
-// ----------------- 6. PATIENT AUTHENTICATION -----------------
+// =========================================================
+// 15. PATIENT AUTHENTICATION (Cloud Synced)
+// =========================================================
 function switchAuthTab(mode) {
   const loginForm = document.getElementById("patient-login-form");
   const regForm = document.getElementById("patient-register-form");
@@ -1420,17 +1534,26 @@ function handlePatientRegister(e) {
   const email = document.getElementById("reg-email").value.trim();
   const password = document.getElementById("reg-password").value;
 
-  const patients = JSON.parse(localStorage.getItem(STORAGE_PREFIX + "patients") || "[]");
-  const existing = patients.find(p => p.phone === phone || p.email === email);
+  const existing = cloudPatients.find(p => p.phone === phone || p.email === email);
   if (existing) {
     alert("An account with this phone or email already exists. Please log in.");
     switchAuthTab("login");
     return;
   }
 
-  const newPatient = { id: "PAT-" + Date.now().toString().slice(-4), name, age, gender, phone, email, password };
-  patients.push(newPatient);
-  localStorage.setItem(STORAGE_PREFIX + "patients", JSON.stringify(patients));
+  const newPatient = {
+    id: "PAT-" + Date.now().toString().slice(-5),
+    name,
+    age,
+    gender,
+    phone,
+    email,
+    password
+  };
+
+  db.collection("patients").doc(newPatient.id).set(newPatient)
+    .catch(err => console.error("Error saving patient:", err));
+
   localStorage.setItem(STORAGE_PREFIX + "active_user", JSON.stringify(newPatient));
 
   showToast(`Welcome, ${name}!`);
@@ -1442,8 +1565,7 @@ function handlePatientLogin(e) {
   const identifier = document.getElementById("login-identifier").value.trim();
   const pass = document.getElementById("login-password").value;
 
-  const patients = JSON.parse(localStorage.getItem(STORAGE_PREFIX + "patients") || "[]");
-  const user = patients.find(p => (p.phone === identifier || p.email === identifier) && p.password === pass);
+  const user = cloudPatients.find(p => (p.phone === identifier || p.email === identifier) && p.password === pass);
 
   if (user) {
     localStorage.setItem(STORAGE_PREFIX + "active_user", JSON.stringify(user));
@@ -1461,7 +1583,9 @@ function handleLogout() {
   navigateTo("home");
 }
 
-// ----------------- EMERGENCY LIST & INITIAL BOOT -----------------
+// =========================================================
+// 16. EMERGENCY LIST & INITIAL BOOT
+// =========================================================
 function renderEmergencySection() {
   const container = document.getElementById("emergency-doctors-list");
   if (!container) return;
@@ -1472,31 +1596,15 @@ function renderEmergencySection() {
         <div style="font-weight:700; font-size:0.95rem; color:#991b1b;">${doc.name}</div>
         <div style="font-size:0.85rem; color:#7f1d1d;">${doc.role} • ${doc.room}</div>
       </div>
-      <a href="tel:${doc.phone.replace(/\\s+/g, '')}" class="btn-emergency-call">
+      <a href="tel:${doc.phone.replace(/\s+/g, '')}" class="btn-emergency-call">
         📞 Call EMO
       </a>
     </div>
   `).join("");
 }
 
-// Real-time synchronization across browser tabs
-window.addEventListener("storage", () => {
-  renderHome();
-  renderLiveQueueBoard();
-  renderPatientTokenView();
-  renderDoctorDesk();
-  if (currentTargetDoctor) renderDirectConsultMessages();
-});
-
-window.addEventListener("mediqueue_sync", () => {
-  renderHome();
-  renderLiveQueueBoard();
-  renderPatientTokenView();
-  renderDoctorDesk();
-  if (currentTargetDoctor) renderDirectConsultMessages();
-});
-
 window.addEventListener("DOMContentLoaded", () => {
+  initRealtimeDatabaseListeners();
   renderHome();
   renderEmergencySection();
   updateAuthHeader();
