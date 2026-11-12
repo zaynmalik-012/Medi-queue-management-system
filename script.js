@@ -290,17 +290,38 @@ function escapeHtml(str) {
 // =========================================================
 // 4. SMART QUEUE ENGINE (Preserves Late Patient Priority)
 // =========================================================
+// Helper: Converts slot string (e.g. "03:00 PM - 03:20 PM") into minutes from midnight for accurate sorting
+function getSlotStartMinutes(slotStr) {
+  if (!slotStr) return 9999;
+  const startPart = slotStr.split("-")[0].trim(); // e.g., "03:00 PM"
+  const [time, modifier] = startPart.split(" ");
+  let [hours, minutes] = time.split(":").map(Number);
+
+  if (modifier === "PM" && hours !== 12) hours += 12;
+  if (modifier === "AM" && hours === 12) hours = 0;
+
+  return (hours * 60) + minutes;
+}
+
+// =========================================================
+// 4. SMART QUEUE ENGINE (Sorts by Appointment Slot + Preserves Late Priority)
+// =========================================================
 const SmartQueue = {
   getDoctorQueue(docId, date) {
     const bookings = getBookings();
     return bookings.filter(b => b.doctorId === docId && b.appointmentDate === date && b.status !== "Cancelled");
   },
 
+  // Sorts by chronological appointment time slot first, then original tokenNumber
   getEligibleQueue(docId, date) {
     const queue = this.getDoctorQueue(docId, date);
     return queue
       .filter(b => b.status === "Waiting" || b.status === "Arrived Late – Waiting")
-      .sort((a, b) => parseInt(a.tokenNumber, 10) - parseInt(b.tokenNumber, 10));
+      .sort((a, b) => {
+        const slotDiff = getSlotStartMinutes(a.timeSlot) - getSlotStartMinutes(b.timeSlot);
+        if (slotDiff !== 0) return slotDiff;
+        return parseInt(a.tokenNumber, 10) - parseInt(b.tokenNumber, 10);
+      });
   },
 
   getCurrentPatient(docId, date) {
@@ -310,7 +331,9 @@ const SmartQueue = {
 
   getLateAwaitingQueue(docId, date) {
     const queue = this.getDoctorQueue(docId, date);
-    return queue.filter(b => b.status === "No Show – Awaiting Arrival");
+    return queue
+      .filter(b => b.status === "No Show – Awaiting Arrival")
+      .sort((a, b) => getSlotStartMinutes(a.timeSlot) - getSlotStartMinutes(b.timeSlot));
   },
 
   callNext(docId, date) {
@@ -421,9 +444,15 @@ const SmartQueue = {
     const all = bookingsList || getBookings();
     const docs = getDoctors();
     const doc = docs.find(d => d.id === docId) || { avgTime: 10 };
+
+    // Sort chronologically by slot time first, then token number
     const eligible = all
       .filter(b => b.doctorId === docId && b.appointmentDate === date && (b.status === "Waiting" || b.status === "Arrived Late – Waiting"))
-      .sort((a, b) => parseInt(a.tokenNumber, 10) - parseInt(b.tokenNumber, 10));
+      .sort((a, b) => {
+        const slotDiff = getSlotStartMinutes(a.timeSlot) - getSlotStartMinutes(b.timeSlot);
+        if (slotDiff !== 0) return slotDiff;
+        return parseInt(a.tokenNumber, 10) - parseInt(b.tokenNumber, 10);
+      });
 
     const inConsult = all.some(b => b.doctorId === docId && b.appointmentDate === date && b.status === "In Consultation");
     const avail = getDoctorAvailability(docId);
